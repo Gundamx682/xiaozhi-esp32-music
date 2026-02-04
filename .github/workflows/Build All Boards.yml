@@ -1,0 +1,93 @@
+name: Build All Boards
+
+on:
+  push:
+    branches:
+      - main
+      - ci/*  # for ci test
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Determine variants to build
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.list.outputs.all_variants }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - id: list
+        name: Get all variant list
+        run: |
+          echo "all_variants=$(python scripts/release.py --list-boards --json)" >> $GITHUB_OUTPUT
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.variants != '[]' && needs.prepare.outputs.variants != '' }}
+    strategy:
+      fail-fast: false  # 单个变体失败不影响其它变体
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.variants) }}
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:release-v5.5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build current variant
+        shell: bash
+        run: |
+          source $IDF_PATH/export.sh
+          python scripts/release.py ${{ matrix.board }} --name ${{ matrix.name }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_${{ matrix.name }}_${{ github.sha }}.bin
+          path: build/merged-binary.bin
+          if-no-files-found: error
+
+  build-summary:
+    name: Build Summary
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Generate build summary
+        run: |
+          echo "## 📊 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Board | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          for artifact in artifacts/*.bin; do
+            if [ -f "$artifact" ]; then
+              filename=$(basename "$artifact")
+              board_name=$(echo "$filename" | sed 's/xiaozhi_//' | sed 's/_[^_]*$//' | sed 's/\.bin$//')
+              echo "| $board_name | ✅ Success |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Total artifacts: $(find artifacts -name "*.bin" | wc -l)" >> $GITHUB_STEP_SUMMARY
